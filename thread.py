@@ -22,6 +22,21 @@ def coo_to_dense(L_data,L_r,L_c,n):
         L[int(L_r[i])][int(L_c[i])]=L_data[i]
     return L
 
+def dense_to_coo(L):
+    n=L.shape[0]
+    L_nnz=0
+    L_data=np.zeros(n*n)
+    L_r=np.zeros(n*n, dtype=int)
+    L_c=np.zeros(n*n, dtype=int)
+    for i in range(n):
+        for j in range(n):
+            if (L[i][j]!=0):
+                L_data[L_nnz]=L[i][j]
+                L_r[L_nnz]=i
+                L_c[L_nnz]=j
+                L_nnz+=1
+    return L_data[:L_nnz],L_r[:L_nnz],L_c[:L_nnz],L_nnz
+
 def cholesky_block(A, block_size):
     n = A.shape[0]
     L = np.zeros_like(A)
@@ -146,6 +161,65 @@ def cholesky_crout4_coo(n, A):
                 L_c[L_nnz]=j
                 L_nnz+=1
     return L_data[:L_nnz],L_r[:L_nnz],L_c[:L_nnz],L_nnz
+
+def cholesky_banachiewicz8_coo(n, A_data, A_r, A_c, A_nnz):
+    "clean"
+    L_nnz=0
+    L_data=np.zeros(100*n)
+    L_r=np.zeros(100*n,dtype=int)
+    L_c=np.zeros(100*n,dtype=int)
+    begin_r=np.zeros(n,dtype=int)
+    current_r=0
+    for i in range(n):
+        begin_r[i]=L_nnz
+        current_i=L_nnz
+        for current in range(current_r,A_nnz):
+            if (A_r[current]==i):
+                current_r=current
+                band=i-A_c[current]
+                break
+
+        for j in range(max(0,i-band),i):
+            sum=0
+            current_j=begin_r[j]
+            current_j_next=begin_r[j+1]
+            for index in range(current_i,L_nnz):
+                k=L_c[index]
+                for index2 in range(current_j,current_j_next):
+                    if (k==L_c[index2]):
+                        sum+=L_data[index]*L_data[index2]
+                        current_j=index2+1
+                        break
+            val=0
+            for current in range(current_r,A_nnz):
+                if (A_r[current]==i):
+                    if (A_c[current]>j):
+                        break
+                    if (A_c[current]==j):
+                        val=A_data[current]
+                        current_r=current+1
+                        break
+            if (sum!=0 or val!=0):
+                L_data[L_nnz]=(val-sum)/L_data[current_j_next-1]
+                L_r[L_nnz]=i
+                L_c[L_nnz]=j
+                L_nnz+=1
+        sum=0
+        for index in range(current_i,L_nnz):
+            sum+=L_data[index]*L_data[index]
+        val=0
+        for current in range(current_r,A_nnz):
+            if (A_r[current]==i):
+                if (A_c[current]==i):
+                    val=A_data[current]
+                    current_r=current+1
+                    break
+        L_data[L_nnz]=np.sqrt(val-sum)
+        L_r[L_nnz]=i
+        L_c[L_nnz]=i
+        L_nnz+=1
+    return L_data[:L_nnz],L_r[:L_nnz],L_c[:L_nnz],L_nnz
+
 
 def cholesky_crout_parallel(A):
     n = A.shape[0]
@@ -368,13 +442,13 @@ def cholesky_crout_coo_parallel3(n, A):
 
 
 def cholesky_crout_coo_parallel(n, A):
-    L_data = mp.Array('d', n * n)  # Shared memory for L_data
-    L_r = mp.Array('i', n * n)  # Shared memory for row indices
-    L_c = mp.Array('i', n * n)  # Shared memory for column indices
-    L_nnz = mp.Value('i', 0)  # Shared counter for non-zero elements
+    L_data=np.zeros(n*n)
+    L_r=np.zeros(n*n,dtype=int)
+    L_c=np.zeros(n*n,dtype=int)
+    L_nnz=0
     queue = mp.Queue()  # Queue for storing local results
 
-    def compute_Li(j, i_start, i_end, L_nnz_old, begin_i, end_i, L_den, queue):
+    def compute_Li(j, i_start, i_end, begin_i, end_i, L_den, queue):
         """Compute L[i][j] for i_start <= i < i_end."""
         local_results = []
         # L_den = 0
@@ -414,6 +488,7 @@ def cholesky_crout_coo_parallel(n, A):
 
             calc = (A[i][j] - sum_k) / L_den
             if np.abs(calc) > 0:
+                # print(i, j, calc, sum_k, A[i][j])
                 local_results.append((i, j, calc))
 
         # Append results back to shared memory
@@ -429,23 +504,20 @@ def cholesky_crout_coo_parallel(n, A):
 
 
     for j in range(n):
-        # Compute L[j][j]
         sum_k = 0
-        for index in range(L_nnz.value):
+        for index in range(L_nnz):
             if L_r[index] == j and L_c[index] < j:
                 sum_k += L_data[index] * L_data[index]
 
         calc = np.sqrt(A[j][j] - sum_k)
         if calc > 0:
-            # with L_nnz.get_lock():
-                idx = L_nnz.value
-                L_data[idx] = calc
-                L_r[idx] = j
-                L_c[idx] = j
-                L_nnz.value += 1
+            L_data[L_nnz] = calc
+            L_r[L_nnz] = j
+            L_c[L_nnz] = j
+            L_nnz += 1
         
         L_den = 0
-        L_nnz_old = L_nnz.value
+        L_nnz_old = L_nnz
         begin_i = np.zeros(n,dtype=int) + L_nnz_old
         end_i = np.zeros(n,dtype=int)
         for index2 in range(L_nnz_old):
@@ -459,30 +531,58 @@ def cholesky_crout_coo_parallel(n, A):
         # Parallelize L[i][j] computation for i > j
         if j + 1 < n:
             processes = []
-            num_processes = 4
+            num_processes = 10#mp.cpu_count()
             chunk_size = (n - (j + 1)) // num_processes + 1
-            for p in range(num_processes):
-                i_start = j + 1 + p * chunk_size
-                i_end = min(j + 1 + (p + 1) * chunk_size, n)
-                if i_start < i_end:
-                    proc = mp.Process(target=compute_Li, args=(j, i_start, i_end, L_nnz_old, begin_i, end_i, L_den, queue))
-                    processes.append(proc)
-                    proc.start()
+            if (chunk_size > 0):
+                # print("ici")
+                for p in range(num_processes):
+                    i_start = j + 1 + p * chunk_size
+                    i_end = min(j + 1 + (p + 1) * chunk_size, n)
+                    if i_start < i_end:
+                        proc = mp.Process(target=compute_Li, args=(j, i_start, i_end, begin_i, end_i, L_den, queue))
+                        processes.append(proc)
+                        proc.start()
 
-            for proc in processes:
-                proc.join()
-            
-            while not queue.empty():
-                results = queue.get()
-                # with L_nnz.get_lock():
-                for i, j, calc in results:
-                    idx = L_nnz.value
-                    L_data[idx] = calc
-                    L_r[idx] = i
-                    L_c[idx] = j
-                    L_nnz.value += 1
+                for proc in processes:
+                    proc.join()
+                
+                while not queue.empty():
+                    results = queue.get()
+                    # with L_nnz.get_lock():
+                    for i, j, calc in results:
+                        L_data[L_nnz] = calc
+                        L_r[L_nnz] = i
+                        L_c[L_nnz] = j
+                        L_nnz += 1
+            else: 
+                for i in range(j+1, n):
+                    sum_k = 0
+                    for index in range(begin_i[i],end_i[i]):
+                        if (L_r[index] == i):
+                            k=L_c[index]
+                            for index2 in range(begin_i[j],end_i[j]):
+                                if (L_c[index2]>k):
+                                    break
+                                if (L_r[index2] == j and L_c[index2] == k):
+                                    sum_k += L_data[index] * L_data[index2]   
 
-    return np.array(L_data[:L_nnz.value]), np.array(L_r[:L_nnz.value], dtype=int), np.array(L_c[:L_nnz.value], dtype=int), L_nnz.value
+                    calc = (A[i][j] - sum_k) / L_den
+                    if np.abs(calc) > 0:
+                        L_data[L_nnz] = calc
+                        L_r[L_nnz] = i
+                        L_c[L_nnz] = j
+                        L_nnz += 1
+
+        # Append results back to shared memory
+        # with L_nnz.get_lock():
+        #     idx = L_nnz.value
+        #     for i, j, calc in local_nnz:
+        #         L_data[idx] = calc
+        #         L_r[idx] = i
+        #         L_c[idx] = j
+        #         L_nnz.value += 1
+        #         idx += 1
+    return L_data[:L_nnz], L_r[:L_nnz], L_c[:L_nnz], L_nnz
 
 
 # A = np.array([[4, 2], [2, 3]],dtype=float)
@@ -491,32 +591,47 @@ def cholesky_crout_coo_parallel(n, A):
 # print("Expected:\n", L_expected)
 # print("Block Result:\n", L_block)
 
-# n=50
-# A = np.random.rand(n, n)
-# A += A.T
-# A += n * np.eye(n)  
+n=50
+A = np.random.rand(n, n)
+A += A.T
+A += n * np.eye(n)  
 
-seed = 42
-rng = np.random.default_rng(seed)
-np.random.seed(seed)
-n=1000
-random_matrix = sp.random(n, n, density=1.05/n, format='csr', data_rvs=lambda n: np.random.choice([0, 1], size=n), random_state=rng)
-random_matrix.setdiag(7)
-A=random_matrix.toarray()
-A+=A.T
+# seed = 42
+# rng = np.random.default_rng(seed)
+# np.random.seed(seed)
+# n=500
+# random_matrix = sp.random(n, n, density=1.05/n, format='csr', data_rvs=lambda n: np.random.choice([0, 1], size=n), random_state=rng)
+# random_matrix.setdiag(7)
+# A=random_matrix.toarray()
+# A+=A.T
 
-# start=time.time()
-# L_data, L_r, L_c, L_nnz = cholesky_crout_coo(n, A)
-# end=time.time()
-# print("Time normal", end-start)
+A_data,A_r,A_c,A_nnz=dense_to_coo(A)
+
 
 print(colored("-------------------------------------------------------------", "cyan"))
+# start=time.time()
+# import line_profiler
+# lp = line_profiler.LineProfiler()
+# lp_wrapper = lp(cholesky_crout_coo_parallel)
+# # lp.add_function(compute_Li)
+# L=lp_wrapper(n,A)
+# lp.print_stats()
+# end=time.time()
+# print(colored("Time : {:f}".format(end-start), "red"))
+# exit()
 
 start=time.time()
-L_par = cholesky_crout_parallel(A)
+L_data, L_r, L_c, L_nnz = cholesky_banachiewicz8_coo(n, A_data, A_r, A_c, A_nnz)
 end=time.time()
-print("Time parallel", end-start)
+print("Time normal", end-start)
+L_par=coo_to_dense(L_data,L_r,L_c,n)
 
+
+start=time.time()
+L_par = cholesky_crout_coo(n,A)
+end=time.time()
+print("Time coo", end-start)
+L_par=coo_to_dense(L_data,L_r,L_c,n)
 
 start=time.time()
 Ln_data,Ln_r,Ln_c,Ln_nnz = cholesky_crout_coo_parallel(n,A)
@@ -524,20 +639,9 @@ end=time.time()
 print("Time parallel", end-start)
 
 
-# start=time.time()
-# import line_profiler
-# lp = line_profiler.LineProfiler()
-# lp_wrapper = lp(cholesky_crout_coo)
-# # lp.add_function(compute_Li)
-# Ln_data,Ln_r,Ln_c,Ln_nnz=lp_wrapper(n,A)
-# lp.print_stats()
-# end=time.time()
-# print(colored("Time : {:f}".format(end-start), "red"))
-
 # L_nor = coo_to_dense(L_data,L_r,L_c,n)
 L_par2 = coo_to_dense(Ln_data,Ln_r,Ln_c,n) 
 # L = cholesky_crout(A)
-
 
 
 # print(L_r,L_c,L_data,L_nnz)
@@ -554,7 +658,7 @@ L_par2 = coo_to_dense(Ln_data,Ln_r,Ln_c,n)
 
 for i in range(n):
     for j in range(n):
-        if (np.abs(L_par[i][j]-L_par2[i][j])>1e-10):
+        if (np.abs(L_par[i][j]-L_par2[i][j])>1e-16):
             print(i,j,L_par[i][j],L_par2[i][j])
             print("Error")
             break
